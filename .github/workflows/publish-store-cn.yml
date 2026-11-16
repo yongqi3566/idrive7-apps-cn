@@ -92,14 +92,15 @@ jobs:
             -f name="Chinese apps $STORE_VERSION" \
             -f body="Prebuilt zh-CN apps without BMW SDK. Source commit: $GITHUB_SHA. Add $GH_REPO in MGU Store and select Releases." --jq .id)"
           gh release upload "$RELEASE_TAG" dist/store-release/*.tgz dist/store-release/*.png
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
           gh api "repos/$GH_REPO/releases/$release_id" > "$RUNNER_TEMP/store-release.json"
           private_args=()
           if [ "$(gh api "repos/$GH_REPO" --jq .private)" = true ]; then
             private_args+=(--private)
           fi
           python3 kit/tools/publish_store.py --bind-release "$RUNNER_TEMP/store-release.json" "${private_args[@]}"
+          python3 kit/tools/publish_store.py --verify-downloads
           gh release upload "$RELEASE_TAG" dist/store-release/catalog.json
-          gh release edit "$RELEASE_TAG" --draft=false --latest=false
       - name: Publish the source catalog last
         shell: bash
         run: |

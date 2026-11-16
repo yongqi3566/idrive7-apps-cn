@@ -34,7 +34,9 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 ## 发布顺序
 
 构建和检查成功后，先把应用包、图标、工具包上传到本次独立的 draft Release；生成指向
-实际附件的 catalog，再公开该 Release。最后更新 `catalog` Release 的 `catalog.json`。
+实际附件的 catalog 前，先公开该 Release 并重新获取附件地址，避免保存草稿的
+`untagged-...` 临时地址。逐个下载并校验包和图标的大小、SHA256 后，最后更新
+`catalog` Release 的 `catalog.json`。
 新包准备好前车机一直读取上一份 catalog。公开仓库使用浏览器下载地址，私有仓库使用
 需要 token 的 Release asset API 地址。
 

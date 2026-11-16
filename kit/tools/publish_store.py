@@ -7,14 +7,18 @@ The catalog release points at packages in a separate release. Updating its
 catalog.json is the last publishing step, after all packages are available.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
-from urllib.parse import quote
+import time
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, urlopen
 
 import build
 from localize import languages, localize_spec
@@ -200,18 +204,70 @@ def build_release(version, repository, language, out):
 
 def bind_release(out, release, private=False):
     """Public download URLs work without a token; private assets need the authenticated API."""
+    if release.get('draft') is not False:
+        raise ValueError('Publish the release before binding its download URLs')
     assets = {a['name']: a for a in release['assets']}
     catalog = read_json(out / 'catalog.json')
+    download_path = '/releases/download/' + quote(release['tag_name'], safe='') + '/'
+
+    def asset_url(asset):
+        if download_path not in urlsplit(asset['browser_download_url']).path:
+            raise ValueError('Asset does not use the published release tag: ' + asset['name'])
+        return asset['url' if private else 'browser_download_url']
+
     for c in catalog['components']:
         a = c['artifact']
         remote = assets[a['name']]
         if remote['size'] != a['size']:
             raise ValueError('Uploaded asset has the wrong size: ' + a['name'])
-        a['url'] = remote['url' if private else 'browser_download_url']
+        a['url'] = asset_url(remote)
         if c.get('icon'):
-            c['icon'] = assets[c['id'] + '.png']['url' if private else 'browser_download_url']
+            c['icon'] = asset_url(assets[c['id'] + '.png'])
     validate_catalog(catalog)
     (out / 'catalog.json').write_bytes(json_bytes(catalog))
+
+
+def verify_downloads(out):
+    """Download every advertised file before publishing the catalog, checking its size and SHA256."""
+    catalog = read_json(out / 'catalog.json')
+    files = []
+    for c in catalog['components']:
+        a = c['artifact']
+        files.append((a['name'], a['url'], a['size'], a['sha256']))
+        if c.get('icon'):
+            files.append((c['id'] + '.png', c['icon'], None, c['iconSha256']))
+
+    def verify(file):
+        name, url, size, sha256 = file
+        for attempt in range(3):
+            try:
+                req = Request(url, headers={'User-Agent': 'idrive7-apps-cn-publisher'})
+                token = os.environ.get('GH_TOKEN')
+                if token and urlsplit(url).hostname == 'api.github.com':
+                    req.add_header('Accept', 'application/octet-stream')
+                    # The token belongs to the API host, never its download redirect.
+                    req.add_unredirected_header('Authorization', 'Bearer ' + token)
+                h, total = hashlib.sha256(), 0
+                with urlopen(req, timeout=30) as response:
+                    while True:
+                        data = response.read(1 << 20)
+                        if not data:
+                            break
+                        total += len(data)
+                        if size is not None and total > size:
+                            raise ValueError('Download exceeds catalog size: ' + name)
+                        h.update(data)
+                if (size is not None and total != size) or h.hexdigest() != sha256:
+                    raise ValueError('Download does not match catalog: ' + name)
+                return
+            except (OSError, ValueError):
+                if attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(verify, files))
+    print('Verified %d published downloads (size and SHA256)' % len(files))
 
 
 def check_update(out, previous):
@@ -236,9 +292,12 @@ def main():
     parser.add_argument('--out', type=Path, default=ROOT / 'dist/store-release')
     parser.add_argument('--bind-release', type=Path, help='bind an existing catalog to a GitHub release API response')
     parser.add_argument('--check-update', type=Path, help='refuse downgrades and changed packages with unchanged versions')
+    parser.add_argument('--verify-downloads', action='store_true', help='download and verify every advertised package and icon')
     parser.add_argument('--private', action='store_true')
     args = parser.parse_args()
-    if args.check_update:
+    if args.verify_downloads:
+        verify_downloads(args.out)
+    elif args.check_update:
         check_update(args.out, read_json(args.check_update))
     elif args.bind_release:
         bind_release(args.out, read_json(args.bind_release), args.private)

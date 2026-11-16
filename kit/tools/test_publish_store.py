@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Exercise real SDK-free app/tool packages and the catalog's release binding, without a car or SDK."""
 import copy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import tarfile
 import tempfile
+import threading
 import unittest
 import warnings
 from unittest.mock import patch
@@ -101,18 +103,65 @@ class StoreReleaseTest(unittest.TestCase):
                      'artifact': {'name': 'example@1.0.7.tgz', 'size': 123, 'sha256': 'a' * 64}}
         catalog = {'schema': 2, 'components': [component]}
         assets = [{'name': name, 'size': 123, 'url': 'https://api.github.com/assets/' + str(i),
-                   'browser_download_url': 'https://github.com/download/' + name}
+                   'browser_download_url': 'https://github.com/owner/repo/releases/download/cn-1.0.7-1/' + name}
                   for i, name in enumerate(('example@1.0.7.tgz', 'example.png'))]
+        release = {'draft': False, 'tag_name': 'cn-1.0.7-1', 'assets': assets}
         for private in (False, True):
             (self.out / 'catalog.json').write_bytes(publish.json_bytes(catalog))
-            publish.bind_release(self.out, {'assets': assets}, private)
+            publish.bind_release(self.out, release, private)
             entry = publish.read_json(self.out / 'catalog.json')['components'][0]
             key = 'url' if private else 'browser_download_url'
             self.assertEqual(entry['artifact']['url'], assets[0][key])
             self.assertEqual(entry['icon'], assets[1][key])
         assets[0]['size'] = 100
         with self.assertRaises(ValueError):
-            publish.bind_release(self.out, {'assets': assets})
+            publish.bind_release(self.out, release)
+
+    def test_draft_and_temporary_asset_urls_are_refused(self):
+        component = {'id': 'example', 'kind': 'app', 'version': '1.0.7',
+                     'artifact': {'name': 'example@1.0.7.tgz', 'size': 123, 'sha256': 'a' * 64}}
+        (self.out / 'catalog.json').write_bytes(publish.json_bytes({'schema': 2, 'components': [component]}))
+        asset = {'name': 'example@1.0.7.tgz', 'size': 123,
+                 'browser_download_url': 'https://github.com/owner/repo/releases/download/untagged-123/example.tgz'}
+        release = {'draft': True, 'tag_name': 'cn-1.0.7-1', 'assets': [asset]}
+        with self.assertRaises(ValueError):
+            publish.bind_release(self.out, release)
+        release['draft'] = False
+        with self.assertRaises(ValueError):
+            publish.bind_release(self.out, release)
+
+    def test_downloads_must_be_accessible_and_match_catalog(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'package')
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            entry = {'id': 'example', 'kind': 'app', 'version': '1.0.7',
+                     'artifact': {'name': 'example@1.0.7.tgz', 'size': 7,
+                                  'url': 'http://127.0.0.1:%d/app.tgz' % server.server_port,
+                                  'sha256': publish.digest(b'package')}}
+            path = self.out / 'catalog.json'
+            path.write_bytes(publish.json_bytes({'schema': 2, 'components': [entry]}))
+            publish.verify_downloads(self.out)
+            entry['artifact']['sha256'] = publish.digest(b'corrupt')
+            path.write_bytes(publish.json_bytes({'schema': 2, 'components': [entry]}))
+            with patch.object(publish.time, 'sleep'), self.assertRaises(ValueError):
+                publish.verify_downloads(self.out)
+            with patch.object(publish, 'urlopen', side_effect=OSError('404')), \
+                    patch.object(publish.time, 'sleep'), self.assertRaises(OSError):
+                publish.verify_downloads(self.out)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_catalog_update_refuses_old_runs_and_unversioned_changes(self):
         c = {'id': 'example', 'kind': 'app', 'version': '1.0.7',
