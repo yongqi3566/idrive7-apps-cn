@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 30
     env:
       PYTHONUTF8: '1'
-      STORE_VERSION: 1.0.${{ github.run_number }}
+      RELEASE_TAG: cn-build-${{ github.run_number }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,7 +47,7 @@ jobs:
           python3 kit/tools/test_id8_ui.py
           python3 kit/tools/test_zh.py
       - name: Build Chinese apps and prebuilt tools without BMW SDK
-        run: python3 kit/tools/publish_store.py --version "$STORE_VERSION" --repository "$GITHUB_REPOSITORY"
+        run: python3 kit/tools/publish_store.py --release-tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" --language zh-CN
       - name: Check packaged Chinese resources
         run: |
           node kit/tools/test_zh.js dist/service/source/javascript/kit
@@ -70,8 +70,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      STORE_VERSION: 1.0.${{ github.run_number }}
-      RELEASE_TAG: cn-1.0.${{ github.run_number }}-${{ github.run_attempt }}
+      RELEASE_TAG: cn-build-${{ github.run_number }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,9 +86,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if catalog_draft="$(gh release view catalog --json isDraft --jq .isDraft)"; then
+            if [ "$catalog_draft" = false ]; then
+              gh release download catalog --pattern catalog.json --output "$RUNNER_TEMP/previous-catalog.json"
+              python3 kit/tools/publish_store.py --reconcile-versions "$RUNNER_TEMP/previous-catalog.json"
+            fi
+          fi
           release_id="$(gh api --method POST "repos/$GH_REPO/releases" \
             -f tag_name="$RELEASE_TAG" -f target_commitish="$GITHUB_SHA" -F draft=true \
-            -f name="Chinese apps $STORE_VERSION" \
+            -f name="Chinese apps build $GITHUB_RUN_NUMBER" \
             -f body="Prebuilt zh-CN apps without BMW SDK. Source commit: $GITHUB_SHA. Add $GH_REPO in MGU Store and select Releases." --jq .id)"
           gh release upload "$RELEASE_TAG" dist/store-release/*.tgz dist/store-release/*.png
           gh release edit "$RELEASE_TAG" --draft=false --latest=false
@@ -107,7 +112,7 @@ jobs:
           set -euo pipefail
           if catalog_draft="$(gh release view catalog --json isDraft --jq .isDraft)"; then
             if [ "$catalog_draft" = false ]; then
-              gh release download catalog --pattern catalog.json --output "$RUNNER_TEMP/previous-catalog.json"
+              gh release download catalog --pattern catalog.json --output "$RUNNER_TEMP/previous-catalog.json" --clobber
               python3 kit/tools/publish_store.py --check-update "$RUNNER_TEMP/previous-catalog.json"
             fi
           else

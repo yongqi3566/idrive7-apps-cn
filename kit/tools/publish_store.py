@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build SDK-free, fixed-language packages and a catalog for the MGU Store.
 
-    python3 kit/tools/publish_store.py --version 1.0.1 --repository owner/repo
+    python3 kit/tools/publish_store.py --release-tag cn-build-1-1 --repository owner/repo
 
 The catalog release points at packages in a separate release. Updating its
 catalog.json is the last publishing step, after all packages are available.
@@ -70,7 +70,10 @@ def artifact(path, base_url):
             'url': base_url + '/' + quote(path.name, safe='')}
 
 
-def pack_app(folder, spec, version, out, base_url):
+def pack_app(folder, spec, out, base_url):
+    version = spec['version']
+    if not SEMVER.fullmatch(version):
+        raise ValueError('App version must be x.y.z: ' + spec['id'])
     src = Path(build.DIST) / folder / 'source'
     members = []
     # All identities in the package use the same Store-compatible version.
@@ -175,9 +178,18 @@ def validate_catalog(catalog):
                 raise ValueError(c['id'] + ': missing capability ' + need)
 
 
-def build_release(version, repository, language, out):
-    if not SEMVER.fullmatch(version):
-        raise ValueError('Version must be x.y.z')
+def app_spec(path, language):
+    raw = read_json(path)
+    spec = localize_spec(raw, language)
+    spec['version'] = raw['version']
+    spec.setdefault('id', path.parent.name)
+    spec.setdefault('mguHmi', ['ID7', 'ID8'])
+    return spec
+
+
+def build_release(release_tag, repository, language, out):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', release_tag):
+        raise ValueError('Release tag must contain letters, numbers, dots, underscores or hyphens')
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Repository must be owner/repo')
     if prebuilt_hash() != source_hash():
@@ -186,20 +198,18 @@ def build_release(version, repository, language, out):
     if any(out.iterdir()):
         raise ValueError('Release output directory must be empty: ' + str(out))
     # The workflow binds these URLs to the actual release assets before publishing the catalog.
-    base_url = 'https://github.com/' + repository + '/releases/download/cn-' + version
+    base_url = 'https://github.com/' + repository + '/releases/download/' + release_tag
     components = []
     for path in sorted((ROOT / 'apps').glob('*/app.json')):
-        spec = localize_spec(read_json(path), language)
-        spec.setdefault('id', path.parent.name)
-        spec.setdefault('mguHmi', ['ID7', 'ID8'])
+        spec = app_spec(path, language)
         build.build(path.parent.name, language, without_sdk=True)
-        components.append(pack_app(path.parent.name, spec, version, out, base_url))
+        components.append(pack_app(path.parent.name, spec, out, base_url))
     for definition in read_json(ROOT / 'mgu-repo.json')['tools']:
         components.append(pack_tool(definition, out, base_url))
-    catalog = {'schema': 2, 'components': components}
+    catalog = {'schema': 2, 'versionPolicy': 'app-json', 'components': components}
     validate_catalog(catalog)
     (out / 'catalog.json').write_bytes(json_bytes(catalog))
-    print('Store release %s: %d components in %s' % (version, len(components), out))
+    print('Store release %s: %d components in %s' % (release_tag, len(components), out))
 
 
 def bind_release(out, release, private=False):
@@ -227,6 +237,27 @@ def bind_release(out, release, private=False):
     (out / 'catalog.json').write_bytes(json_bytes(catalog))
 
 
+def download_file(file):
+    name, url, size, sha256 = file
+    for attempt in range(3):
+        try:
+            req = Request(url, headers={'User-Agent': 'idrive7-apps-cn-publisher'})
+            token = os.environ.get('GH_TOKEN')
+            if token and urlsplit(url).hostname == 'api.github.com':
+                req.add_header('Accept', 'application/octet-stream')
+                # The token belongs to the API host, never its download redirect.
+                req.add_unredirected_header('Authorization', 'Bearer ' + token)
+            with urlopen(req, timeout=30) as response:
+                data = response.read((size if size is not None else 128 * 1024) + 1)
+            if (size is not None and len(data) != size) or digest(data) != sha256:
+                raise ValueError('Download does not match catalog: ' + name)
+            return data
+        except (OSError, ValueError):
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+
+
 def verify_downloads(out):
     """Download every advertised file before publishing the catalog, checking its size and SHA256."""
     catalog = read_json(out / 'catalog.json')
@@ -238,32 +269,7 @@ def verify_downloads(out):
             files.append((c['id'] + '.png', c['icon'], None, c['iconSha256']))
 
     def verify(file):
-        name, url, size, sha256 = file
-        for attempt in range(3):
-            try:
-                req = Request(url, headers={'User-Agent': 'idrive7-apps-cn-publisher'})
-                token = os.environ.get('GH_TOKEN')
-                if token and urlsplit(url).hostname == 'api.github.com':
-                    req.add_header('Accept', 'application/octet-stream')
-                    # The token belongs to the API host, never its download redirect.
-                    req.add_unredirected_header('Authorization', 'Bearer ' + token)
-                h, total = hashlib.sha256(), 0
-                with urlopen(req, timeout=30) as response:
-                    while True:
-                        data = response.read(1 << 20)
-                        if not data:
-                            break
-                        total += len(data)
-                        if size is not None and total > size:
-                            raise ValueError('Download exceeds catalog size: ' + name)
-                        h.update(data)
-                if (size is not None and total != size) or h.hexdigest() != sha256:
-                    raise ValueError('Download does not match catalog: ' + name)
-                return
-            except (OSError, ValueError):
-                if attempt == 2:
-                    raise
-                time.sleep(attempt + 1)
+        download_file(file)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(verify, files))
@@ -274,37 +280,74 @@ def check_update(out, previous):
     catalog = read_json(out / 'catalog.json')
     validate_catalog(catalog)
     old = {c['id']: c for c in previous['components']}
+    old_app_versions = {c['version'] for c in previous['components'] if c['kind'] == 'app'}
+    migration = (catalog.get('versionPolicy') == 'app-json' and previous.get('versionPolicy') is None and
+                 len(old_app_versions) == 1 and re.fullmatch(r'1\.0\.(0|[1-9]\d*)', next(iter(old_app_versions))))
     for c in catalog['components']:
         before = old.get(c['id'])
         if not before:
             continue
         if tuple(map(int, c['version'].split('.'))) < tuple(map(int, before['version'].split('.'))):
-            raise ValueError('Refusing to publish an older version of ' + c['id'])
+            if not (migration and c['kind'] == 'app'):
+                raise ValueError('Refusing to publish an older version of ' + c['id'])
+            print('Migrating %s from build version %s to app.json version %s; an installed higher version needs reinstalling' %
+                  (c['id'], before['version'], c['version']))
         if c['version'] == before['version'] and c['artifact']['sha256'] != before['artifact']['sha256']:
             raise ValueError('Package changed without a version bump: ' + c['id'])
 
 
+def reconcile_versions(out, previous):
+    """Republish the same bytes for unchanged app versions, even when shared runtime files changed."""
+    catalog = read_json(out / 'catalog.json')
+    old = {c['id']: c for c in previous['components']}
+    for i, c in enumerate(catalog['components']):
+        before = old.get(c['id'])
+        if c['kind'] != 'app' or not before or c['version'] != before['version']:
+            continue
+        a = before['artifact']
+        if c['artifact']['sha256'] != a['sha256']:
+            print('%s %s: keeping the published package; app.json version must increase to ship changed content' %
+                  (c['id'], c['version']))
+            (out / a['name']).write_bytes(download_file((a['name'], a['url'], a['size'], a['sha256'])))
+        if before.get('icon') and c.get('iconSha256') != before.get('iconSha256'):
+            name = c['id'] + '.png'
+            (out / name).write_bytes(download_file((name, before['icon'], None, before['iconSha256'])))
+        catalog['components'][i] = copy.deepcopy(before)
+    validate_catalog(catalog)
+    path = out / 'catalog.json'
+    original = path.read_bytes()
+    path.write_bytes(json_bytes(catalog))
+    try:
+        check_update(out, previous)
+    except Exception:
+        path.write_bytes(original)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--version')
+    parser.add_argument('--release-tag')
     parser.add_argument('--repository')
     parser.add_argument('--language', choices=languages(), default='zh-CN')
     parser.add_argument('--out', type=Path, default=ROOT / 'dist/store-release')
     parser.add_argument('--bind-release', type=Path, help='bind an existing catalog to a GitHub release API response')
     parser.add_argument('--check-update', type=Path, help='refuse downgrades and changed packages with unchanged versions')
+    parser.add_argument('--reconcile-versions', type=Path, help='keep published packages for unchanged app versions')
     parser.add_argument('--verify-downloads', action='store_true', help='download and verify every advertised package and icon')
     parser.add_argument('--private', action='store_true')
     args = parser.parse_args()
-    if args.verify_downloads:
+    if args.reconcile_versions:
+        reconcile_versions(args.out, read_json(args.reconcile_versions))
+    elif args.verify_downloads:
         verify_downloads(args.out)
     elif args.check_update:
         check_update(args.out, read_json(args.check_update))
     elif args.bind_release:
         bind_release(args.out, read_json(args.bind_release), args.private)
-    elif args.version and args.repository:
-        build_release(args.version, args.repository, args.language, args.out)
+    elif args.release_tag and args.repository:
+        build_release(args.release_tag, args.repository, args.language, args.out)
     else:
-        parser.error('--version and --repository are required to build')
+        parser.error('--release-tag and --repository are required to build')
 
 
 if __name__ == '__main__':

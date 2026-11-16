@@ -10,7 +10,7 @@
 2. 选择 **Publish Chinese Store source → Run workflow → main**。后续 `main` 上
    `apps/`、`kit/`、`mgu-repo.json` 或发布 workflow 的变更会自动触发构建和发布。
 3. 等待 `build`、`publish` 两个 job 成功，确认 Releases 中出现 `catalog` 和
-   `cn-1.0.<运行序号>-<尝试序号>`。
+   `cn-build-<运行序号>-<尝试序号>`。
 4. 在车机 Store 的 **Add source** 中添加 `yongqi3566/idrive7-apps-cn`，选择 **Releases**。
 
 选择分支或 Tags 仍然会使用源码构建。Actions 的运行附件只用于传递构建结果，车机实际下载
@@ -19,10 +19,13 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 
 ## 版本和依赖
 
-- 本发布渠道所有应用统一使用 `1.0.<github.run_number>`。包内 manifest、RHMI 元数据和
-  catalog 的版本一致；上游 `app.json` 的版本和本地化逻辑不变。
-- 每次新运行都会提高应用版本，包括上游只修改代码、未调整版本的同步。重新运行同一次
-  workflow 保持应用版本，使用新的尝试序号存放附件；需要车机收到更新时发起一次新运行。
+- 每个应用使用自己的 `apps/<id>/app.json` 中的 `version`，格式须为 `x.y.z`。包内
+  manifest、RHMI 元数据和 catalog 的版本一致，不添加语言后缀，也不使用 Actions 序号。
+- Release 的 `cn-build-<运行序号>-<尝试序号>` 只标识发布批次，与应用版本无关。
+  Sync 或重跑 workflow 不会自动提高应用版本；Store 只在来源版本高于已安装版本时提示更新。
+- 应用版本没变时，保留此前发布的包、图标和元数据，并将它们复制到本次 Release。
+  即使共享 runtime、汉化或构建工具变化导致重建内容不同，也不会替换同版本的包。
+  要发布这些变化，需提高受影响应用的 `app.json` 版本；版本提高后才发布它的新包。
 - renderer、inputgate 保留各自 `component.json` 的版本及安装钩子。应用的 `requires`
   保留，catalog 同时列出两个工具；renderer 也声明 `renderer` 能力。
 - 工具代码或预编译文件发生变化时，仍需提高对应工具版本。发布前检查 renderer 的源码
@@ -30,6 +33,10 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 - 应用 ID 与上游相同。本源不是已安装的上游源的自动替代品；切换来源前需在 Store
   中移除旧来源的同 ID 应用，再从本源安装。移除 source 本身不会卸载应用。需要两份
   应用并存时，应另行分配独立 ID。
+
+旧渠道曾统一使用 `1.0.N`。首次切换到 `app-json` 版本策略时允许一次应用版本迁移，
+之后继续严格禁止版本倒退。目前 `live_adjustments` 的源版本为 `0.9.6`，低于旧的
+`1.0.2`；如果已经安装了旧统一版本，需在 Store 移除并重新安装该应用一次。
 
 ## 发布顺序
 
@@ -40,8 +47,10 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 新包准备好前车机一直读取上一份 catalog。公开仓库使用浏览器下载地址，私有仓库使用
 需要 token 的 Release asset API 地址。
 
-更新 catalog 前会与已发布版本比较：拒绝回退版本，也拒绝同版本但内容不同的包，避免
-旧 workflow 重跑覆盖新版本，或工具文件修改后忘记提高版本。
+上传前先复用版本未变的应用包，更新 catalog 前再次比较已发布版本：除上述一次性迁移外，
+拒绝回退版本，也拒绝同版本但内容不同的包。原生工具不参与应用包复用，内容变化必须提高
+工具版本。本次 catalog 的所有资源都在本次 Release；清理旧 Release 前仍应检查当前
+`catalog` 的资源 URL，保留它引用的 Release 以及固定入口 `catalog`。
 
 ## 本地验证
 
@@ -52,7 +61,7 @@ python kit/tools/test_publish_store.py
 python kit/tools/test_fit_to_unit.py
 python kit/tools/test_id8_ui.py
 python kit/tools/test_zh.py
-python kit/tools/publish_store.py --version 1.0.1 --repository yongqi3566/idrive7-apps-cn
+python kit/tools/publish_store.py --release-tag cn-build-local-1 --repository yongqi3566/idrive7-apps-cn
 ```
 
 输出在 `dist/store-release/`，输出目录须为空；开发者可选择其他空目录 `--out <目录>`。

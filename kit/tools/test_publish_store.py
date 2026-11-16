@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import build
 import publish_store as publish
-from localize import localize_spec
 
 
 class StoreReleaseTest(unittest.TestCase):
@@ -38,8 +37,10 @@ class StoreReleaseTest(unittest.TestCase):
 
     def test_app_is_installable_chinese_and_sdk_free(self):
         build.build('service', 'zh-CN', without_sdk=True)
-        spec = localize_spec(publish.read_json(publish.ROOT / 'apps/service/app.json'), 'zh-CN')
-        entry = publish.pack_app('service', spec, '1.0.7', self.out, 'https://example.com/releases/7')
+        spec = publish.app_spec(publish.ROOT / 'apps/service/app.json', 'zh-CN')
+        version = publish.read_json(publish.ROOT / 'apps/service/app.json')['version']
+        self.assertEqual(spec['version'], version)
+        entry = publish.pack_app('service', spec, self.out, 'https://example.com/releases/7')
         with tarfile.open(self.out / entry['artifact']['name'], 'r:gz') as tf:
             names = tf.getnames()
             self.assertFalse(any('oap-sdk' in n for n in names))
@@ -47,9 +48,9 @@ class StoreReleaseTest(unittest.TestCase):
             self.assertIn('package/rhmiData/uiDescriptions/ID7/application.xml', names)
             self.assertIn('package/rhmiData/uiDescriptions/ID8/application.xml', names)
             for name in ('package/package.json', 'package/npm-shrinkwrap.json', 'package/javascript/kit/app-spec.json'):
-                self.assertEqual(json.load(tf.extractfile(name))['version'], '1.0.7')
+                self.assertEqual(json.load(tf.extractfile(name))['version'], version)
             app = json.load(tf.extractfile('package/rhmiData/application.json'))
-            self.assertEqual(app['application']['version'], '1.0.7')
+            self.assertEqual(app['application']['version'], version)
             locale = json.load(tf.extractfile('package/javascript/kit/locale.json'))
             self.assertEqual(locale['language'], 'zh-CN')
             self.assertTrue(locale['strings'])
@@ -58,8 +59,19 @@ class StoreReleaseTest(unittest.TestCase):
         self.assertEqual(entry['mguHmi'], ['ID7', 'ID8'])
         self.assertNotIn('build', entry)
         first = (self.out / entry['artifact']['name']).read_bytes()
-        publish.pack_app('service', spec, '1.0.7', self.out, 'https://example.com/releases/7')
+        second = publish.pack_app('service', spec, self.out, 'https://example.com/releases/8')
         self.assertEqual(first, (self.out / entry['artifact']['name']).read_bytes())
+        self.assertEqual(second['version'], entry['version'])
+        self.assertNotEqual(second['artifact']['url'], entry['artifact']['url'])
+
+    def test_each_app_uses_its_own_source_version(self):
+        versions = set()
+        for path in (publish.ROOT / 'apps').glob('*/app.json'):
+            spec = publish.app_spec(path, 'zh-CN')
+            self.assertEqual(spec['version'], publish.read_json(path)['version'])
+            self.assertRegex(spec['version'], publish.SEMVER)
+            versions.add(spec['version'])
+        self.assertGreater(len(versions), 1)
 
     def test_build_defaults_still_require_and_embed_sdk(self):
         build.build('service')
@@ -179,6 +191,92 @@ class StoreReleaseTest(unittest.TestCase):
         old['components'][0]['artifact']['sha256'] = 'b' * 64
         with self.assertRaises(ValueError):
             publish.check_update(self.out, old)
+
+    def test_app_version_migration_is_allowed_only_once(self):
+        previous = {'schema': 2, 'components': [
+            {'id': 'example', 'kind': 'app', 'version': '1.0.2', 'artifact': {'sha256': 'a' * 64}}]}
+        catalog = copy.deepcopy(previous)
+        catalog['versionPolicy'] = 'app-json'
+        catalog['components'][0].update(version='0.9.6', artifact={'sha256': 'b' * 64})
+        (self.out / 'catalog.json').write_bytes(publish.json_bytes(catalog))
+        publish.check_update(self.out, previous)
+        previous['versionPolicy'] = 'app-json'
+        with self.assertRaises(ValueError):
+            publish.check_update(self.out, previous)
+        del previous['versionPolicy']
+        previous['components'][0]['kind'] = 'tool'
+        catalog['components'][0]['kind'] = 'tool'
+        (self.out / 'catalog.json').write_bytes(publish.json_bytes(catalog))
+        with self.assertRaises(ValueError):
+            publish.check_update(self.out, previous)
+
+    def versioned_entry(self, kind='app'):
+        data = b'published package'
+        icon = b'published icon'
+        return {'id': 'example', 'kind': kind, 'version': '1.2.3', 'title': 'Published title',
+                'icon': 'https://example.com/old/example.png', 'iconSha256': publish.digest(icon),
+                'artifact': {'name': 'example@1.2.3.tgz', 'size': len(data),
+                             'sha256': publish.digest(data),
+                             'url': 'https://example.com/old/example@1.2.3.tgz'}}, data, icon
+
+    def test_same_app_version_reuses_published_bytes_and_metadata(self):
+        before, package, icon = self.versioned_entry()
+        previous = {'schema': 2, 'versionPolicy': 'app-json', 'components': [before]}
+        catalog = copy.deepcopy(previous)
+        current = catalog['components'][0]
+        current['title'] = 'Changed title'
+        current['artifact'].update(sha256=publish.digest(b'changed runtime'), size=15)
+        current['iconSha256'] = publish.digest(b'changed icon')
+        (self.out / 'catalog.json').write_bytes(publish.json_bytes(catalog))
+        (self.out / before['artifact']['name']).write_bytes(b'changed runtime')
+        (self.out / 'example.png').write_bytes(b'changed icon')
+        with patch.object(publish, 'download_file', side_effect=[package, icon]) as download:
+            publish.reconcile_versions(self.out, previous)
+            self.assertEqual(download.call_count, 2)
+        self.assertEqual((self.out / before['artifact']['name']).read_bytes(), package)
+        self.assertEqual((self.out / 'example.png').read_bytes(), icon)
+        self.assertEqual(publish.read_json(self.out / 'catalog.json'), previous)
+        assets = [{'name': name, 'size': len(data),
+                   'browser_download_url': 'https://github.com/owner/repo/releases/download/cn-build-9-1/' + name}
+                  for name, data in ((before['artifact']['name'], package), ('example.png', icon))]
+        publish.bind_release(self.out, {'draft': False, 'tag_name': 'cn-build-9-1', 'assets': assets})
+        rebound = publish.read_json(self.out / 'catalog.json')['components'][0]
+        self.assertEqual(rebound['artifact']['url'], assets[0]['browser_download_url'])
+        self.assertEqual(rebound['icon'], assets[1]['browser_download_url'])
+
+    def test_higher_app_version_uses_new_package(self):
+        before, _, _ = self.versioned_entry()
+        previous = {'schema': 2, 'versionPolicy': 'app-json', 'components': [before]}
+        catalog = copy.deepcopy(previous)
+        catalog['components'][0].update(version='1.2.4', artifact={'sha256': 'b' * 64})
+        (self.out / 'catalog.json').write_bytes(publish.json_bytes(catalog))
+        with patch.object(publish, 'download_file') as download:
+            publish.reconcile_versions(self.out, previous)
+            download.assert_not_called()
+        self.assertEqual(publish.read_json(self.out / 'catalog.json'), catalog)
+
+    def test_tool_content_change_requires_a_version_bump(self):
+        before, _, _ = self.versioned_entry(kind='tool')
+        previous = {'schema': 2, 'versionPolicy': 'app-json', 'components': [before]}
+        catalog = copy.deepcopy(previous)
+        catalog['components'][0]['artifact']['sha256'] = 'b' * 64
+        original = publish.json_bytes(catalog)
+        (self.out / 'catalog.json').write_bytes(original)
+        with self.assertRaisesRegex(ValueError, 'without a version bump'):
+            publish.reconcile_versions(self.out, previous)
+        self.assertEqual((self.out / 'catalog.json').read_bytes(), original)
+
+    def test_unavailable_previous_package_stops_republishing(self):
+        before, _, _ = self.versioned_entry()
+        previous = {'schema': 2, 'versionPolicy': 'app-json', 'components': [before]}
+        catalog = copy.deepcopy(previous)
+        catalog['components'][0]['artifact']['sha256'] = 'b' * 64
+        original = publish.json_bytes(catalog)
+        (self.out / 'catalog.json').write_bytes(original)
+        with patch.object(publish, 'download_file', side_effect=OSError('missing package')), \
+                self.assertRaises(OSError):
+            publish.reconcile_versions(self.out, previous)
+        self.assertEqual((self.out / 'catalog.json').read_bytes(), original)
 
 
 if __name__ == '__main__':
