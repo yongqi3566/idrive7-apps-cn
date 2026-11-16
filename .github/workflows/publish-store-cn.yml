@@ -1,0 +1,117 @@
+name: Publish Chinese Store source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/**'
+      - 'kit/**'
+      - 'mgu-repo.json'
+      - '.github/workflows/publish-store-cn.yml'
+  pull_request:
+    paths:
+      - 'kit/tools/build.py'
+      - 'kit/tools/publish_store.py'
+      - 'kit/tools/test_publish_store.py'
+      - '.github/workflows/publish-store-cn.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-store-cn-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+      STORE_VERSION: 1.0.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check packaging and UI resources
+        run: |
+          python3 kit/tools/test_publish_store.py
+          python3 kit/tools/test_fit_to_unit.py
+          python3 kit/tools/test_id8_ui.py
+          python3 kit/tools/test_zh.py
+      - name: Build Chinese apps and prebuilt tools without BMW SDK
+        run: python3 kit/tools/publish_store.py --version "$STORE_VERSION" --repository "$GITHUB_REPOSITORY"
+      - name: Check packaged Chinese resources
+        run: |
+          node kit/tools/test_zh.js dist/service/source/javascript/kit
+          node kit/tools/test_zh.js dist/dtc_scanner/source/javascript/kit
+          node kit/tools/test_diagnostic_zh.js dist/dtc_scanner/source/javascript
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-cn
+          path: dist/store-release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      STORE_VERSION: 1.0.${{ github.run_number }}
+      RELEASE_TAG: cn-1.0.${{ github.run_number }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-cn
+          path: dist/store-release
+      - name: Upload packages before advertising the catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(gh api --method POST "repos/$GH_REPO/releases" \
+            -f tag_name="$RELEASE_TAG" -f target_commitish="$GITHUB_SHA" -F draft=true \
+            -f name="Chinese apps $STORE_VERSION" \
+            -f body="Prebuilt zh-CN apps without BMW SDK. Source commit: $GITHUB_SHA. Add $GH_REPO in MGU Store and select Releases." --jq .id)"
+          gh release upload "$RELEASE_TAG" dist/store-release/*.tgz dist/store-release/*.png
+          gh api "repos/$GH_REPO/releases/$release_id" > "$RUNNER_TEMP/store-release.json"
+          private_args=()
+          if [ "$(gh api "repos/$GH_REPO" --jq .private)" = true ]; then
+            private_args+=(--private)
+          fi
+          python3 kit/tools/publish_store.py --bind-release "$RUNNER_TEMP/store-release.json" "${private_args[@]}"
+          gh release upload "$RELEASE_TAG" dist/store-release/catalog.json
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+      - name: Publish the source catalog last
+        shell: bash
+        run: |
+          set -euo pipefail
+          if catalog_draft="$(gh release view catalog --json isDraft --jq .isDraft)"; then
+            if [ "$catalog_draft" = false ]; then
+              gh release download catalog --pattern catalog.json --output "$RUNNER_TEMP/previous-catalog.json"
+              python3 kit/tools/publish_store.py --check-update "$RUNNER_TEMP/previous-catalog.json"
+            fi
+          else
+            gh release create catalog --target "$GITHUB_SHA" --draft --title 'Chinese Store source' \
+              --notes "MGU Store catalog for the prebuilt zh-CN apps in $GH_REPO. Select Releases when adding this source."
+          fi
+          gh release upload catalog dist/store-release/catalog.json --clobber
+          gh release edit catalog --draft=false --latest=false
