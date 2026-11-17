@@ -77,3 +77,52 @@ CI 验证包结构、本地化资源及元数据，不能代替实车兼容性�
 发布相关逻辑集中在新增的 workflow、`publish_store.py`、测试和本文档。现有 `build.py`
 只扩展 `--without-sdk` 选项，原有构建默认行为不变。同步上游后先检查 Actions；即使
 没有 Git 文本冲突，上游改变 manifest 或包结构也可能需要调整发布脚本。
+
+## GitCode 镜像
+
+`Sync GitCode mirror` 是独立的单向同步流程，不在 GitCode 重新编译。GitHub 仍是主仓库：
+`main` 推送或 Tag 推送后同步 Git 分支和标签；`Publish Chinese Store source` 成功后，
+同步当前所有公开发布的 Release、说明和附件。也可以手动运行同步 workflow 补同步或重试。
+普通 Git 推送不触发 Release 同步；发布 workflow 成功后的 `workflow_run` 才触发，
+因此不依赖 `GITHUB_TOKEN` 创建 Release 是否产生其他 Actions 事件。
+
+在 GitHub 仓库 **Settings → Secrets and variables → Actions** 中配置：
+
+| 类型 | 名称 | 值 |
+| --- | --- | --- |
+| Repository secret | `GITCODE_TOKEN` | 有目标仓库 Git 写入和 Release API 权限的个人访问令牌 |
+| Repository variable | `GITCODE_REPOSITORY` | `yongqi3566/idrive7-apps-cn` |
+| Repository variable，可选 | `GITCODE_USERNAME` | Git HTTPS 认证用户名；默认使用目标仓库所属空间名称 |
+| Repository variable，可选 | `GITCODE_HOST` | 默认 `gitcode.com`，也支持 `atomgit.com` |
+
+先创建公开的目标仓库，推荐空仓库；目标分支和标签必须与 GitHub 一致或可快进。
+脚本不强推业务分支、不删除目标独有分支和 Tag，不覆盖内容不同的已发布应用包。
+目标保护规则如果阻止正常推送，需要在 GitCode 调整机器人账号权限。
+
+同步下载 GitHub 最终发布的附件，而不是构建 job 的中间产物，确保与同版本旧包复用策略一致。
+先核对源 catalog 的大小和 SHA256，再逐个上传并匿名下载校验 GitCode 附件。
+GitCode catalog 只替换包及图标的 URL，应用版本、文件内容、大小和 SHA256 不变。
+下载地址使用官方 Release 附件下载 API，避免把会过期的对象存储上传签名保存到 catalog。
+
+每个 GitCode Release 都包含对应的 catalog 副本，固定 `catalog` Release 最后更新。
+由于替换 Release 附件需要删除旧附件再上传，车机应使用独立生成分支 `store-catalog`
+中的 `catalog.json` 作为 HTTPS 源入口。该分支只在所有包和 Release catalog 校验成功后
+提交更新；GitHub catalog 中途变化、应用版本倒退、包下载失败时保留上一版分支入口。
+分支更新使用带旧 SHA 的 lease，拒绝并发旧任务覆盖；重复同步相同内容不新增入口提交。
+
+GitCode 成功同步后，在 Actions 摘要查看经过匿名下载校验的 **Store HTTPS source** 地址，
+在 Store 添加 HTTPS 源。默认地址为：
+
+```text
+https://gitcode.com/yongqi3566/idrive7-apps-cn/raw/store-catalog/catalog.json
+```
+
+不要把 GitCode `owner/repo` 填入 Store 的 GitHub Releases 渠道。首次联调必须确认目标平台
+的 API、Git 认证、附件下载和上述 raw 地址可匿名使用；工作流只在最终入口下载校验成功后
+报告同步成功。`store-catalog` 由同步脚本维护，不要在 GitHub 创建同名分支或手动编辑它。
+
+本地测试（不连接 GitCode、不需要 Token）：
+
+```sh
+python kit/tools/test_sync_gitcode.py
+```
