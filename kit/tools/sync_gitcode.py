@@ -6,7 +6,7 @@ releases, never rebuilt. The generated store-catalog branch is the last write.
 """
 import argparse
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed, ThreadPoolExecutor
 import copy
 import json
 import os
@@ -157,11 +157,25 @@ class GitCode(Api):
                 raise ValueError('GitCode did not return the attachment id needed to update ' + name)
             self.call(self.root + '/releases/' + quote(tag, safe='') +
                       '/attach_files/' + quote(str(asset['id']), safe=''), 'DELETE')
-        upload = self.call(self.root + '/releases/' + quote(tag, safe='') + '/upload_url?' +
-                           urlencode({'file_name': name}))
-        if urlsplit(upload['url']).scheme != 'https':
-            raise ValueError('Upload URL must use HTTPS')
-        request_bytes(upload['url'], 'PUT', data, upload['headers'], timeout=600)
+        for attempt in range(2):
+            upload = self.call(self.root + '/releases/' + quote(tag, safe='') + '/upload_url?' +
+                               urlencode({'file_name': name}))
+            if urlsplit(upload['url']).scheme != 'https':
+                raise ValueError('Upload URL must use HTTPS')
+            try:
+                request_bytes(upload['url'], 'PUT', data, upload['headers'], timeout=900)
+                break
+            except ApiError:
+                raise
+            except RuntimeError as error:
+                # A lost response can still mean a successful upload. Check before retrying.
+                try:
+                    checked_download(url, len(data), digest)
+                    return url
+                except ApiError as missing:
+                    if missing.status != 404 or attempt == 1:
+                        raise error
+                print('Retrying interrupted upload: %s/%s' % (tag, name), flush=True)
         # The object storage callback can take a moment to publish the attachment.
         for attempt in range(5):
             try:
@@ -319,9 +333,18 @@ def sync_releases(source, target, refs, folder):
         return asset, target.upload_asset(release['tag_name'], asset['name'], path.read_bytes())
 
     binaries = [r for r in records if r[1]['name'] != 'catalog.json']
+    errors = []
     with ThreadPoolExecutor(max_workers=3) as pool:
-        for asset, url in pool.map(upload, binaries):
-            urls[asset['url']] = urls[asset['browser_download_url']] = url
+        futures = [pool.submit(upload, record) for record in binaries]
+        for future in as_completed(futures):
+            try:
+                asset, url = future.result()
+                urls[asset['url']] = urls[asset['browser_download_url']] = url
+            except (RuntimeError, ValueError) as error:
+                print('Attachment sync failed: ' + str(error), flush=True)
+                errors.append(error)
+    if errors:
+        raise errors[0]
     # Check that the source entry is still current before changing either fixed entry.
     if source.catalog_bytes() != source_entry:
         raise ValueError('GitHub catalog changed during sync; rerun with the new release')

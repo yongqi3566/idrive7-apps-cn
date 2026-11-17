@@ -164,9 +164,31 @@ class SyncTest(unittest.TestCase):
                 patch.object(sync, 'request_bytes') as request:
             url = target.upload_asset('catalog', 'catalog.json', b'new', replace=True)
         self.assertEqual(call.call_args_list[0].args, ('/repos/owner/repo/releases/catalog/attach_files/7', 'DELETE'))
-        request.assert_called_once_with(upload['url'], 'PUT', b'new', upload['headers'], timeout=600)
+        request.assert_called_once_with(upload['url'], 'PUT', b'new', upload['headers'], timeout=900)
         self.assertNotIn('signature', url)
         self.assertTrue(url.endswith('/catalog/attach_files/catalog.json/download'))
+
+    def test_interrupted_upload_retries_only_after_confirming_absence(self):
+        target = sync.GitCode('owner/repo', 'secret')
+        upload = {'url': 'https://storage.example/upload', 'headers': {}}
+        with patch.object(target, 'release', return_value={'assets': []}), \
+                patch.object(target, 'call', return_value=upload) as call, \
+                patch.object(sync, 'request_bytes', side_effect=[RuntimeError('timeout'), b'']) as request, \
+                patch.object(sync, 'checked_download', side_effect=[sync.ApiError(404, '/download'), b'package']):
+            target.upload_asset('v1', 'app.tgz', b'package')
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(call.call_count, 2)
+
+    def test_lost_upload_response_does_not_reupload_valid_attachment(self):
+        target = sync.GitCode('owner/repo', 'secret')
+        upload = {'url': 'https://storage.example/upload', 'headers': {}}
+        with patch.object(target, 'release', return_value={'assets': []}), \
+                patch.object(target, 'call', return_value=upload) as call, \
+                patch.object(sync, 'request_bytes', side_effect=RuntimeError('lost response')) as request, \
+                patch.object(sync, 'checked_download', return_value=b'package'):
+            target.upload_asset('v1', 'app.tgz', b'package')
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(call.call_count, 1)
 
     def test_transport_credentials_do_not_follow_redirects(self):
         class Response:
