@@ -2,7 +2,7 @@ name: Sync GitCode mirror
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['**']
   pull_request:
     paths:

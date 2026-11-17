@@ -81,7 +81,7 @@ CI 验证包结构、本地化资源及元数据，不能代替实车兼容性�
 ## GitCode 镜像
 
 `Sync GitCode mirror` 是独立的单向同步流程，不在 GitCode 重新编译。GitHub 仍是主仓库：
-`main` 推送或 Tag 推送后同步 Git 分支和标签；`Publish Chinese Store source` 成功后，
+任意分支推送或 Tag 推送后同步 Git 分支和标签；`Publish Chinese Store source` 成功后，
 同步当前所有公开发布的 Release、说明和附件。也可以手动运行同步 workflow 补同步或重试。
 普通 Git 推送不触发 Release 同步；发布 workflow 成功后的 `workflow_run` 才触发，
 因此不依赖 `GITHUB_TOKEN` 创建 Release 是否产生其他 Actions 事件。
