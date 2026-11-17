@@ -6,6 +6,8 @@ on:
     paths:
       - 'apps/**'
       - 'kit/**'
+      - '!kit/tools/sync_gitcode.py'
+      - '!kit/tools/test_sync_gitcode.py'
       - 'mgu-repo.json'
       - '.github/workflows/publish-store-cn.yml'
   pull_request:

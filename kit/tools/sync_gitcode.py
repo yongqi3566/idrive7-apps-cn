@@ -326,7 +326,8 @@ def sync_releases(source, target, refs, folder):
     if output != previous:
         refs.publish_entry(output, old)
     # Anonymous use is a requirement for the Store's generic HTTPS source.
-    stable_url = 'https://' + target.host + '/' + target.repository + '/raw/' + CATALOG_BRANCH + '/catalog.json'
+    stable_url = ('https://api.' + target.host + '/api/v5/repos/' + target.repository +
+                  '/raw/catalog.json?ref=' + CATALOG_BRANCH)
     checked_download(stable_url, len(output), publish.digest(output))
     print('Store HTTPS source: ' + stable_url, flush=True)
     summary = os.environ.get('GITHUB_STEP_SUMMARY')

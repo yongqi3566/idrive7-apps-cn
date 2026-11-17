@@ -114,7 +114,7 @@ GitCode 成功同步后，在 Actions 摘要查看经过匿名下载校验的 **
 在 Store 添加 HTTPS 源。默认地址为：
 
 ```text
-https://gitcode.com/yongqi3566/idrive7-apps-cn/raw/store-catalog/catalog.json
+https://api.gitcode.com/api/v5/repos/yongqi3566/idrive7-apps-cn/raw/catalog.json?ref=store-catalog
 ```
 
 不要把 GitCode `owner/repo` 填入 Store 的 GitHub Releases 渠道。首次联调必须确认目标平台

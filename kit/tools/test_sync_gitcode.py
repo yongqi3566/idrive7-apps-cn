@@ -97,7 +97,7 @@ class SyncTest(unittest.TestCase):
         output = self.target.uploaded[('catalog', 'catalog.json')]
         self.assertEqual(self.refs.published, [(output, None)])
         verify.assert_called_with(output)
-        check.assert_called_with('https://gitcode.com/owner/repo/raw/store-catalog/catalog.json',
+        check.assert_called_with('https://api.gitcode.com/api/v5/repos/owner/repo/raw/catalog.json?ref=store-catalog',
                                  len(output), sync.publish.digest(output))
         self.assertEqual(self.target.metadata[0]['target_commitish'], 'a' * 40)
 
