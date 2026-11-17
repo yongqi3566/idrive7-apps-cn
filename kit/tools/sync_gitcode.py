@@ -6,6 +6,7 @@ releases, never rebuilt. The generated store-catalog branch is the last write.
 """
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
 import os
@@ -31,7 +32,7 @@ class ApiError(RuntimeError):
         super().__init__('API HTTP %s: %s' % (status, path.split('?')[0]))
 
 
-def request_bytes(url, method='GET', data=None, headers=None, token=None, limit=MAX_ASSET):
+def request_bytes(url, method='GET', data=None, headers=None, token=None, limit=MAX_ASSET, timeout=120):
     """Keep API credentials off redirects, object storage and exception messages."""
     req = Request(url, data=data, method=method,
                   headers=dict({'User-Agent': 'idrive7-apps-cn-sync'}, **(headers or {})))
@@ -39,7 +40,7 @@ def request_bytes(url, method='GET', data=None, headers=None, token=None, limit=
         req.add_unredirected_header('Authorization', 'Bearer ' + token)
     for attempt in range(3):
         try:
-            with urlopen(req, timeout=120) as response:
+            with urlopen(req, timeout=timeout) as response:
                 body = response.read(limit + 1)
             if len(body) > limit:
                 raise ValueError('Response exceeds size limit')
@@ -160,7 +161,7 @@ class GitCode(Api):
                            urlencode({'file_name': name}))
         if urlsplit(upload['url']).scheme != 'https':
             raise ValueError('Upload URL must use HTTPS')
-        request_bytes(upload['url'], 'PUT', data, upload['headers'])
+        request_bytes(upload['url'], 'PUT', data, upload['headers'], timeout=600)
         # The object storage callback can take a moment to publish the attachment.
         for attempt in range(5):
             try:
@@ -270,11 +271,19 @@ def sync_releases(source, target, refs, folder):
     if entry is None:
         raise ValueError('GitHub has no published catalog release')
     # Files are copied before catalogs, including historical releases that may reference one another.
-    records, known = [], {}
+    records, known, cached = [], {}, {}
     for release in sorted(releases, key=lambda r: (r['tag_name'] == 'catalog', r['published_at'] or '')):
         for asset in release['assets']:
             path = folder / ('asset-%d' % len(records))
-            data = source.asset_bytes(asset)
+            key = (asset.get('digest'), asset['size'])
+            if key[0] and key in cached:
+                data = cached[key].read_bytes()
+            else:
+                data = source.asset_bytes(asset)
+                if key[0]:
+                    if key[0] != 'sha256:' + publish.digest(data):
+                        raise ValueError('GitHub asset digest mismatch: ' + asset['name'])
+                    cached[key] = path
             path.write_bytes(data)
             record = (release, asset, path)
             records.append(record)
@@ -304,11 +313,15 @@ def sync_releases(source, target, refs, folder):
         metadata = dict(release, target_commitish=refs.ref_sha(release['tag_name']))
         target.ensure_release(metadata)
     urls = {}
-    for release, asset, path in records:
-        if asset['name'] == 'catalog.json':
-            continue
-        url = target.upload_asset(release['tag_name'], asset['name'], path.read_bytes())
-        urls[asset['url']] = urls[asset['browser_download_url']] = url
+
+    def upload(record):
+        release, asset, path = record
+        return asset, target.upload_asset(release['tag_name'], asset['name'], path.read_bytes())
+
+    binaries = [r for r in records if r[1]['name'] != 'catalog.json']
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        for asset, url in pool.map(upload, binaries):
+            urls[asset['url']] = urls[asset['browser_download_url']] = url
     # Check that the source entry is still current before changing either fixed entry.
     if source.catalog_bytes() != source_entry:
         raise ValueError('GitHub catalog changed during sync; rerun with the new release')

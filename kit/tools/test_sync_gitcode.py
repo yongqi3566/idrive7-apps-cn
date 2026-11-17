@@ -164,7 +164,7 @@ class SyncTest(unittest.TestCase):
                 patch.object(sync, 'request_bytes') as request:
             url = target.upload_asset('catalog', 'catalog.json', b'new', replace=True)
         self.assertEqual(call.call_args_list[0].args, ('/repos/owner/repo/releases/catalog/attach_files/7', 'DELETE'))
-        request.assert_called_once_with(upload['url'], 'PUT', b'new', upload['headers'])
+        request.assert_called_once_with(upload['url'], 'PUT', b'new', upload['headers'], timeout=600)
         self.assertNotIn('signature', url)
         self.assertTrue(url.endswith('/catalog/attach_files/catalog.json/download'))
 
