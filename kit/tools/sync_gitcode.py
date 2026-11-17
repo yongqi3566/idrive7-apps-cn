@@ -279,11 +279,29 @@ def verify_catalog(data):
                 raise ValueError('Mirrored icon does not match catalog: ' + c['id'])
 
 
-def sync_releases(source, target, refs, folder):
+def sync_releases(source, target, refs, folder, all_releases=False):
     releases = source.releases()
     entry = next((r for r in releases if r['tag_name'] == 'catalog'), None)
     if entry is None:
         raise ValueError('GitHub has no published catalog release')
+    entry_assets = [a for a in entry['assets'] if a['name'] == 'catalog.json']
+    if len(entry_assets) != 1:
+        raise ValueError('GitHub catalog release must have one catalog.json')
+    source_entry = source.asset_bytes(entry_assets[0])
+    if not all_releases:
+        # Automatic sync follows the published source, without backfilling unrelated history.
+        catalog = json.loads(source_entry)
+        publish.validate_catalog(catalog)
+        owners = {}
+        for release in releases:
+            for asset in release['assets']:
+                owners[asset['url']] = owners[asset['browser_download_url']] = release['tag_name']
+        needed = {'catalog'}
+        for c in catalog['components']:
+            needed.add(owners[c['artifact']['url']])
+            if c.get('icon'):
+                needed.add(owners[c['icon']])
+        releases = [r for r in releases if r['tag_name'] in needed]
     # Files are copied before catalogs, including historical releases that may reference one another.
     records, known, cached = [], {}, {}
     for release in sorted(releases, key=lambda r: (r['tag_name'] == 'catalog', r['published_at'] or '')):
@@ -293,7 +311,7 @@ def sync_releases(source, target, refs, folder):
             if key[0] and key in cached:
                 data = cached[key].read_bytes()
             else:
-                data = source.asset_bytes(asset)
+                data = source_entry if asset['id'] == entry_assets[0]['id'] else source.asset_bytes(asset)
                 if key[0]:
                     if key[0] != 'sha256:' + publish.digest(data):
                         raise ValueError('GitHub asset digest mismatch: ' + asset['name'])
@@ -305,7 +323,6 @@ def sync_releases(source, target, refs, folder):
     fixed = [r for r in records if r[0]['tag_name'] == 'catalog' and r[1]['name'] == 'catalog.json']
     if len(fixed) != 1:
         raise ValueError('GitHub catalog release must have one catalog.json')
-    source_entry = fixed[0][2].read_bytes()
     for _, asset, path in records:
         if asset['name'] == 'catalog.json':
             doc = json.loads(path.read_bytes())
@@ -378,6 +395,7 @@ def main():
     parser.add_argument('--target', default=os.environ.get('GITCODE_REPOSITORY'))
     parser.add_argument('--host', choices=['gitcode.com', 'atomgit.com'], default=os.environ.get('GITCODE_HOST', 'gitcode.com'))
     parser.add_argument('--refs-only', action='store_true')
+    parser.add_argument('--all-releases', action='store_true', help='also backfill historical releases; automatic sync only follows the current catalog')
     args = parser.parse_args()
     for name in ('source', 'target'):
         if not REPO.fullmatch(getattr(args, name) or ''):
@@ -391,7 +409,8 @@ def main():
                        args.host, os.environ.get('GITCODE_USERNAME') or args.target.split('/')[0])
         refs.mirror()
         if not args.refs_only:
-            sync_releases(GitHub(args.source, gh_token), GitCode(args.target, gc_token, args.host), refs, folder)
+            sync_releases(GitHub(args.source, gh_token), GitCode(args.target, gc_token, args.host), refs, folder,
+                          args.all_releases)
 
 
 if __name__ == '__main__':

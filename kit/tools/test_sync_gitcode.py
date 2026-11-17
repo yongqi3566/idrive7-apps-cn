@@ -22,7 +22,7 @@ class Source:
         self.data = {'package': self.package, 'icon': self.icon, 'snapshot': self.catalog_bytes(),
                      'entry': self.catalog_bytes()}
         def asset(name, key):
-            return {'name': name, 'url': 'https://api.github.com/' + key,
+            return {'id': key, 'name': name, 'url': 'https://api.github.com/' + key,
                     'browser_download_url': 'https://github.com/' + key, 'size': len(self.data[key])}
         self.list = [
             {'tag_name': 'catalog', 'published_at': '2026-01-02', 'name': 'Store source', 'body': '',
@@ -88,6 +88,27 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(self.source.catalog_bytes(), original)
         with self.assertRaises(KeyError):
             sync.rewrite_catalog(original, {})
+
+    def add_history(self):
+        self.source.data['history'] = b'historical release'
+        self.source.list.append({'tag_name': 'old', 'published_at': '2025-01-01', 'name': 'Old', 'body': '',
+                                 'assets': [{'id': 'history', 'name': 'old.tgz', 'size': 18,
+                                             'url': 'https://api.github.com/history',
+                                             'browser_download_url': 'https://github.com/history'}]})
+
+    def test_automatic_sync_does_not_backfill_history(self):
+        self.add_history()
+        with patch.object(sync, 'verify_catalog'), patch.object(sync, 'checked_download'), \
+                patch.object(self.source, 'asset_bytes', wraps=self.source.asset_bytes) as download:
+            sync.sync_releases(self.source, self.target, self.refs, self.folder)
+        self.assertNotIn(('old', 'old.tgz'), self.target.uploaded)
+        self.assertFalse(any(c.args[0]['id'] == 'history' for c in download.call_args_list))
+
+    def test_explicit_backfill_mirrors_historical_releases(self):
+        self.add_history()
+        with patch.object(sync, 'verify_catalog'), patch.object(sync, 'checked_download'):
+            sync.sync_releases(self.source, self.target, self.refs, self.folder, all_releases=True)
+        self.assertEqual(self.target.uploaded[('old', 'old.tgz')], b'historical release')
 
     def test_published_bytes_are_mirrored_and_entry_is_last(self):
         with patch.object(sync, 'verify_catalog') as verify, patch.object(sync, 'checked_download') as check:
