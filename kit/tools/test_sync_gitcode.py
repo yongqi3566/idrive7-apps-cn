@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import sync_gitcode as sync
 
@@ -166,6 +167,31 @@ class SyncTest(unittest.TestCase):
             url = target.upload_asset('v1', 'app.tgz', b'package')
         call.assert_not_called()
         check.assert_called_once_with(url, 7, sync.publish.digest(b'package'))
+
+    def test_release_inventory_is_read_once_for_multiple_attachments(self):
+        target = sync.GitCode('owner/repo', 'secret')
+        with patch.object(target, 'release', return_value={'assets': [{'name': 'a.tgz'}, {'name': 'b.tgz'}]}) as release, \
+                patch.object(target, 'call'), patch.object(sync, 'checked_download'):
+            target.ensure_release({'tag_name': 'v1', 'name': 'Version 1', 'body': ''})
+            target.upload_asset('v1', 'a.tgz', b'a')
+            target.upload_asset('v1', 'b.tgz', b'b')
+        release.assert_called_once_with('v1')
+
+    def test_rate_rejection_waits_before_retrying_a_mutation(self):
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, limit):
+                return b'{}'
+        error = HTTPError('https://api.gitcode.com/test', 429, 'rate limit', {'Retry-After': '30'}, None)
+        with patch.object(sync, '_api_next', 0), patch.object(sync, 'API_INTERVAL', 0), \
+                patch.object(sync, 'urlopen', side_effect=[error, Response()]) as open_url, \
+                patch.object(sync.time, 'sleep') as sleep:
+            self.assertEqual(sync.request_bytes('https://api.gitcode.com/test', 'POST', b'{}'), b'{}')
+        self.assertEqual(open_url.call_count, 2)
+        sleep.assert_called_once_with(30)
 
     def test_conflicting_package_is_never_overwritten(self):
         target = sync.GitCode('owner/repo', 'secret')

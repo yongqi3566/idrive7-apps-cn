@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
@@ -24,6 +25,9 @@ import publish_store as publish
 REPO = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z')
 CATALOG_BRANCH = 'store-catalog'
 MAX_ASSET = 200 * 1024 * 1024
+API_INTERVAL = 1.1
+_api_lock = threading.Lock()
+_api_next = 0.0
 
 
 class ApiError(RuntimeError):
@@ -39,6 +43,15 @@ def request_bytes(url, method='GET', data=None, headers=None, token=None, limit=
     if token:
         req.add_unredirected_header('Authorization', 'Bearer ' + token)
     for attempt in range(3):
+        if urlsplit(url).hostname in ('api.gitcode.com', 'api.atomgit.com'):
+            global _api_next
+            with _api_lock:
+                now = time.monotonic()
+                delay = max(0, _api_next - now)
+                _api_next = max(now, _api_next) + API_INTERVAL
+            if delay:
+                time.sleep(delay)
+        retry_delay = attempt + 1
         try:
             with urlopen(req, timeout=timeout) as response:
                 body = response.read(limit + 1)
@@ -46,13 +59,17 @@ def request_bytes(url, method='GET', data=None, headers=None, token=None, limit=
                 raise ValueError('Response exceeds size limit')
             return body
         except HTTPError as error:
-            # Only GET is automatically retried: a mutation may already have succeeded.
-            if method != 'GET' or error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+            # A 429 rejects the request. Other failed mutations may already have succeeded.
+            if (method != 'GET' and error.code != 429) or error.code not in (429, 500, 502, 503, 504) or attempt == 2:
                 raise ApiError(error.code, urlsplit(url).path) from None
+            if error.code == 429:
+                after = error.headers.get('Retry-After', '60')
+                retry_delay = min(60, max(1, int(after))) if after.isdigit() else 60
+                print('GitCode API rate limit; waiting before retry', flush=True)
         except (OSError, URLError):
             if method != 'GET' or attempt == 2:
                 raise RuntimeError('Network request failed: ' + urlsplit(url).hostname) from None
-        time.sleep(attempt + 1)
+        time.sleep(retry_delay)
 
 
 def checked_download(url, size, sha256):
@@ -117,6 +134,7 @@ class GitCode(Api):
             raise ValueError('GitCode host must be gitcode.com or atomgit.com')
         super().__init__('https://api.' + host + '/api/v5', repository, token)
         self.host = host
+        self.release_assets = {}
 
     def ensure_release(self, source):
         tag = source['tag_name']
@@ -124,14 +142,15 @@ class GitCode(Api):
         if source.get('prerelease'):
             body['release_status'] = 'pre'
         try:
-            self.release(tag)
+            existing = self.release(tag)
         except ApiError as error:
             if error.status != 404:
                 raise
             body.update(tag_name=tag, target_commitish=source['target_commitish'])
-            self.call(self.root + '/releases', 'POST', body)
+            existing = self.call(self.root + '/releases', 'POST', body)
         else:
             self.call(self.root + '/releases/' + quote(tag, safe=''), 'PATCH', body)
+        self.release_assets[tag] = existing['assets']
 
     def download_url(self, tag, name):
         # This documented endpoint is stable; OBS upload signatures must never enter a catalog.
@@ -140,7 +159,9 @@ class GitCode(Api):
 
     def upload_asset(self, tag, name, data, replace=False):
         digest = publish.digest(data)
-        existing = [a for a in self.release(tag)['assets'] if a['name'] == name]
+        if tag not in self.release_assets:
+            self.release_assets[tag] = self.release(tag)['assets']
+        existing = [a for a in self.release_assets[tag] if a['name'] == name]
         if len(existing) > 1:
             raise ValueError('Duplicate GitCode attachment: ' + name)
         url = self.download_url(tag, name)
