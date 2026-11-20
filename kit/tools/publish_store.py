@@ -287,106 +287,20 @@ def check_update(out, previous):
         before = old.get(c['id'])
         if not before:
             continue
-        if tuple(map(int, c['version'].split('.'))) < tuple(map(int, before['version'].split('.'))):
+        previous_version = before['version']
+        if c['kind'] == 'tool' and before.get('sourceVersion'):
+            # Restore upstream versions after the retired automatic tool versioning policy.
+            previous_version = before['sourceVersion']
+        if tuple(map(int, c['version'].split('.'))) < tuple(map(int, previous_version.split('.'))):
             if not (migration and c['kind'] == 'app'):
                 raise ValueError('Refusing to publish an older version of ' + c['id'])
             print('Migrating %s from build version %s to app.json version %s; an installed higher version needs reinstalling' %
                   (c['id'], before['version'], c['version']))
-        if c['version'] == before['version'] and c['artifact']['sha256'] != before['artifact']['sha256']:
-            raise ValueError('Package changed without a version bump: ' + c['id'])
-
-
-def tool_members(data):
-    members = []
-    seen = set()
-    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tf:
-        for member in tf.getmembers():
-            safe_path(member.name)
-            if not member.isfile() or member.name in seen:
-                raise ValueError('Invalid tool package member: ' + member.name)
-            seen.add(member.name)
-            members.append((member.name, tf.extractfile(member).read(), member.mode))
-    if 'component.json' not in seen:
-        raise ValueError('Tool package has no component.json')
-    return members
-
-
-def tool_content(members):
-    """Compare installed files and hooks, ignoring only the package's version."""
-    content = []
-    for name, data, mode in sorted(members):
-        if name == 'component.json':
-            manifest = json.loads(data)
-            del manifest['version']
-            data = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode('utf-8')
-        content.append((name, mode, digest(data)))
-    return digest(json_bytes(content))
-
-
-def reconcile_tool(out, current, before):
-    source_version = current['version']
-    version = lambda v: tuple(map(int, v.split('.')))
-    if version(source_version) < version(before.get('sourceVersion', before['version'])):
-        raise ValueError('Refusing to publish an older source version of ' + current['id'])
-    current['sourceVersion'] = source_version
-    if version(source_version) > version(before['version']):
-        return current
-    a = before['artifact']
-    data = download_file((a['name'], a['url'], a['size'], a['sha256']))
-    path = out / current['artifact']['name']
-    members = tool_members(path.read_bytes())
-    if tool_content(members) == tool_content(tool_members(data)):
-        path.unlink()
-        (out / a['name']).write_bytes(data)
-        entry = copy.deepcopy(before)
-        entry['sourceVersion'] = source_version
-        print('%s %s: keeping the published tool; installed content is unchanged' % (entry['id'], entry['version']))
-        return entry
-    major, minor, patch = version(before['version'])
-    current['version'] = '%d.%d.%d' % (major, minor, patch + 1)
-    for i, (name, data, mode) in enumerate(members):
-        if name == 'component.json':
-            manifest = json.loads(data)
-            manifest['version'] = current['version']
-            members[i] = (name, json_bytes(manifest), mode)
-    target = out / (current['id'] + '@' + current['version'] + '.tgz')
-    pack(target, members)
-    path.unlink()
-    current['artifact'] = artifact(target, current['artifact']['url'].rsplit('/', 1)[0])
-    print('%s: tool content changed; source version %s, release version %s' %
-          (current['id'], source_version, current['version']))
-    return current
 
 
 def reconcile_versions(out, previous):
-    """Keep unchanged app versions; version tool content independently of upstream's manifests."""
-    catalog = read_json(out / 'catalog.json')
-    old = {c['id']: c for c in previous['components']}
-    for i, c in enumerate(catalog['components']):
-        before = old.get(c['id'])
-        if c['kind'] == 'tool' and before:
-            catalog['components'][i] = reconcile_tool(out, c, before)
-            continue
-        if c['kind'] != 'app' or not before or c['version'] != before['version']:
-            continue
-        a = before['artifact']
-        if c['artifact']['sha256'] != a['sha256']:
-            print('%s %s: keeping the published package; app.json version must increase to ship changed content' %
-                  (c['id'], c['version']))
-            (out / a['name']).write_bytes(download_file((a['name'], a['url'], a['size'], a['sha256'])))
-        if before.get('icon') and c.get('iconSha256') != before.get('iconSha256'):
-            name = c['id'] + '.png'
-            (out / name).write_bytes(download_file((name, before['icon'], None, before['iconSha256'])))
-        catalog['components'][i] = copy.deepcopy(before)
-    validate_catalog(catalog)
-    path = out / 'catalog.json'
-    original = path.read_bytes()
-    path.write_bytes(json_bytes(catalog))
-    try:
-        check_update(out, previous)
-    except Exception:
-        path.write_bytes(original)
-        raise
+    """Validate source versions while retaining every freshly built package."""
+    check_update(out, previous)
 
 
 def main():
@@ -396,8 +310,8 @@ def main():
     parser.add_argument('--language', choices=languages(), default='zh-CN')
     parser.add_argument('--out', type=Path, default=ROOT / 'dist/store-release')
     parser.add_argument('--bind-release', type=Path, help='bind an existing catalog to a GitHub release API response')
-    parser.add_argument('--check-update', type=Path, help='refuse downgrades and changed packages with unchanged versions')
-    parser.add_argument('--reconcile-versions', type=Path, help='keep published packages for unchanged app versions')
+    parser.add_argument('--check-update', type=Path, help='refuse source version downgrades; allow rebuilt packages at the same version')
+    parser.add_argument('--reconcile-versions', type=Path, help='validate source versions without replacing freshly built packages')
     parser.add_argument('--verify-downloads', action='store_true', help='download and verify every advertised package and icon')
     parser.add_argument('--private', action='store_true')
     args = parser.parse_args()

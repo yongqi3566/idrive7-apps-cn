@@ -153,6 +153,15 @@ class SyncTest(unittest.TestCase):
         self.assertFalse(self.target.metadata)
         self.assertFalse(self.refs.published)
 
+    def test_same_version_rebuild_can_replace_catalog_entry(self):
+        previous = copy.deepcopy(self.source.catalog)
+        previous['components'][0]['artifact']['sha256'] = 'b' * 64
+        self.refs.previous = sync.publish.json_bytes(previous)
+        with patch.object(sync, 'verify_catalog'), patch.object(sync, 'checked_download'):
+            sync.sync_releases(self.source, self.target, self.refs, self.folder)
+        self.assertTrue(self.refs.published)
+        self.assertEqual(self.target.uploaded[('cn-build-1-1', 'example@1.2.3.tgz')], self.source.package)
+
     def test_identical_entry_does_not_create_another_commit(self):
         with patch.object(sync, 'verify_catalog'), patch.object(sync, 'checked_download'):
             sync.sync_releases(self.source, self.target, self.refs, self.folder)

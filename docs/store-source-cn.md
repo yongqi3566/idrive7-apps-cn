@@ -23,20 +23,19 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
   manifest、RHMI 元数据和 catalog 的版本一致，不添加语言后缀，也不使用 Actions 序号。
 - Release 的 `cn-build-<运行序号>-<尝试序号>` 只标识发布批次，与应用版本无关。
   Sync 或重跑 workflow 不会自动提高应用版本；Store 只在来源版本高于已安装版本时提示更新。
-- 应用版本没变时，保留此前发布的包、图标和元数据，并将它们复制到本次 Release。
-  即使共享 runtime、汉化或构建工具变化导致重建内容不同，也不会替换同版本的包。
-  要发布这些变化，需提高受影响应用的 `app.json` 版本；版本提高后才发布它的新包。
-- renderer、inputgate 的初始版本来自各自 `component.json`，保留安装钩子。应用的 `requires`
+- 每次发布都使用当前源码构建应用包、图标和元数据。即使应用版本没变，也发布本次
+  构建的内容，不复用旧包、不自动递增版本。Store 按版本号判断更新，同版本内容变化
+  不会提示升级，需要重新安装才能获取新内容。
+- renderer、inputgate 的版本严格来自各自 `component.json`，保留安装钩子。应用的 `requires`
   保留，catalog 同时列出两个工具；renderer 也声明 `renderer` 能力。
 - 发布前检查 renderer 的源码指纹与预编译二进制是否匹配。不匹配或缺少二进制时，
   Actions 使用上游 Ubuntu 18.04 Docker 环境编译 x86-64 renderer、inputgate，执行
   `check-target` 和 renderer 测试后更新本次打包文件；失败时停止发布。产物不提交回 Git。
   renderer 的配套脚本也从当前源码刷新；指纹检查继续保留。
-- 工具版本先采用上游 `component.json`。与上次 Release 比较时，若上游版本未超过
-  已发布版本，则比较包内文件、权限和安装钩子（仅忽略 manifest 的版本字段）：内容相同
-  复用已发布包；内容变化则将已发布版本的补丁号加一，并同步更新包内 manifest、文件名
-  和 catalog。catalog 的工具条目用 `sourceVersion` 记录上游版本，继续拒绝上游版本倒退。
-  上游版本超过已发布版本时直接采用上游版本。此策略仅适用于工具，不改应用版本。
+- 工具代码变化但上游版本没变时，仍按该版本编译发布，包内 manifest、文件名和 catalog
+  与上游版本保持一致。此前自动递增的工具版本根据旧 catalog 的 `sourceVersion` 一次性
+  恢复为上游版本；例如 renderer 从 `2.1.20` 恢复为 `2.1.19`。已安装较高版本的用户
+  需要重新安装以恢复版本一致。继续拒绝真正的源版本倒退。
 - 应用 ID 与上游相同。本源不是已安装的上游源的自动替代品；切换来源前需在 Store
   中移除旧来源的同 ID 应用，再从本源安装。移除 source 本身不会卸载应用。需要两份
   应用并存时，应另行分配独立 ID。
@@ -54,8 +53,8 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 新包准备好前车机一直读取上一份 catalog。公开仓库使用浏览器下载地址，私有仓库使用
 需要 token 的 Release asset API 地址。
 
-上传前先复用版本未变的应用包，更新 catalog 前再次比较已发布版本：除上述一次性迁移外，
-拒绝回退版本，也拒绝同版本但内容不同的包。工具内容变化由上述版本协调步骤处理。
+上传前及更新 catalog 前校验源版本：除上述一次性迁移外，拒绝源版本倒退，允许同版本
+内容变化。每批 Release 使用独立 Tag 保存本次包，历史 Release 中的包不会被覆盖。
 发布前及切换固定 catalog 前检查源码提交仍是 main 最新提交，防止旧任务覆盖新源码的发布。
 本次 catalog 的所有资源都在本次 Release；清理旧 Release 前仍应检查当前
 `catalog` 的资源 URL，保留它引用的 Release 以及固定入口 `catalog`。
@@ -112,7 +111,7 @@ CI 验证包结构、本地化资源及元数据，不能代替实车兼容性�
 脚本不强推业务分支、不删除目标独有分支和 Tag，不覆盖内容不同的已发布应用包。
 目标保护规则如果阻止正常推送，需要在 GitCode 调整机器人账号权限。
 
-同步下载 GitHub 最终发布的附件，而不是构建 job 的中间产物，确保与同版本旧包复用策略一致。
+同步下载 GitHub 最终发布的附件，确保镜像与 GitHub 本次发布的包完全一致。
 先核对源 catalog 的大小和 SHA256，再逐个上传并匿名下载校验 GitCode 附件。
 GitCode catalog 只替换包及图标的 URL，应用版本、文件内容、大小和 SHA256 不变。
 下载地址使用官方 Release 附件下载 API，避免把会过期的对象存储上传签名保存到 catalog。
