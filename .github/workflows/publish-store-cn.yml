@@ -15,6 +15,9 @@ on:
       - 'kit/tools/build.py'
       - 'kit/tools/publish_store.py'
       - 'kit/tools/test_publish_store.py'
+      - 'kit/tools/prepare_store_renderer.py'
+      - 'kit/tools/test_prepare_store_renderer.py'
+      - 'kit/renderd/**'
       - '.github/workflows/publish-store-cn.yml'
   workflow_dispatch:
 
@@ -28,7 +31,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       PYTHONUTF8: '1'
       RELEASE_TAG: cn-build-${{ github.run_number }}-${{ github.run_attempt }}
@@ -45,9 +48,12 @@ jobs:
       - name: Check packaging and UI resources
         run: |
           python3 kit/tools/test_publish_store.py
+          python3 kit/tools/test_prepare_store_renderer.py
           python3 kit/tools/test_fit_to_unit.py
           python3 kit/tools/test_id8_ui.py
           python3 kit/tools/test_zh.py
+      - name: Prepare source-matched renderer and controller gate
+        run: python3 kit/tools/prepare_store_renderer.py
       - name: Build Chinese apps and prebuilt tools without BMW SDK
         run: python3 kit/tools/publish_store.py --release-tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" --language zh-CN
       - name: Check packaged Chinese resources
@@ -88,6 +94,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)" != "$GITHUB_SHA" ]; then
+            echo 'Source build was superseded by a newer main commit; publish the newer run instead.' >&2
+            exit 1
+          fi
           if catalog_draft="$(gh release view catalog --json isDraft --jq .isDraft)"; then
             if [ "$catalog_draft" = false ]; then
               gh release download catalog --pattern catalog.json --output "$RUNNER_TEMP/previous-catalog.json"
@@ -112,6 +122,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)" != "$GITHUB_SHA" ]; then
+            echo 'Source changed during publishing; keeping the existing catalog.' >&2
+            exit 1
+          fi
           if catalog_draft="$(gh release view catalog --json isDraft --jq .isDraft)"; then
             if [ "$catalog_draft" = false ]; then
               gh release download catalog --pattern catalog.json --output "$RUNNER_TEMP/previous-catalog.json" --clobber

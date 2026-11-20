@@ -193,7 +193,7 @@ def build_release(release_tag, repository, language, out):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Repository must be owner/repo')
     if prebuilt_hash() != source_hash():
-        raise ValueError('Renderer prebuilt does not match its source; rebuild and commit it before publishing')
+        raise ValueError('Renderer prebuilt does not match its source; run kit/tools/prepare_store_renderer.py before publishing')
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise ValueError('Release output directory must be empty: ' + str(out))
@@ -296,12 +296,77 @@ def check_update(out, previous):
             raise ValueError('Package changed without a version bump: ' + c['id'])
 
 
+def tool_members(data):
+    members = []
+    seen = set()
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tf:
+        for member in tf.getmembers():
+            safe_path(member.name)
+            if not member.isfile() or member.name in seen:
+                raise ValueError('Invalid tool package member: ' + member.name)
+            seen.add(member.name)
+            members.append((member.name, tf.extractfile(member).read(), member.mode))
+    if 'component.json' not in seen:
+        raise ValueError('Tool package has no component.json')
+    return members
+
+
+def tool_content(members):
+    """Compare installed files and hooks, ignoring only the package's version."""
+    content = []
+    for name, data, mode in sorted(members):
+        if name == 'component.json':
+            manifest = json.loads(data)
+            del manifest['version']
+            data = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        content.append((name, mode, digest(data)))
+    return digest(json_bytes(content))
+
+
+def reconcile_tool(out, current, before):
+    source_version = current['version']
+    version = lambda v: tuple(map(int, v.split('.')))
+    if version(source_version) < version(before.get('sourceVersion', before['version'])):
+        raise ValueError('Refusing to publish an older source version of ' + current['id'])
+    current['sourceVersion'] = source_version
+    if version(source_version) > version(before['version']):
+        return current
+    a = before['artifact']
+    data = download_file((a['name'], a['url'], a['size'], a['sha256']))
+    path = out / current['artifact']['name']
+    members = tool_members(path.read_bytes())
+    if tool_content(members) == tool_content(tool_members(data)):
+        path.unlink()
+        (out / a['name']).write_bytes(data)
+        entry = copy.deepcopy(before)
+        entry['sourceVersion'] = source_version
+        print('%s %s: keeping the published tool; installed content is unchanged' % (entry['id'], entry['version']))
+        return entry
+    major, minor, patch = version(before['version'])
+    current['version'] = '%d.%d.%d' % (major, minor, patch + 1)
+    for i, (name, data, mode) in enumerate(members):
+        if name == 'component.json':
+            manifest = json.loads(data)
+            manifest['version'] = current['version']
+            members[i] = (name, json_bytes(manifest), mode)
+    target = out / (current['id'] + '@' + current['version'] + '.tgz')
+    pack(target, members)
+    path.unlink()
+    current['artifact'] = artifact(target, current['artifact']['url'].rsplit('/', 1)[0])
+    print('%s: tool content changed; source version %s, release version %s' %
+          (current['id'], source_version, current['version']))
+    return current
+
+
 def reconcile_versions(out, previous):
-    """Republish the same bytes for unchanged app versions, even when shared runtime files changed."""
+    """Keep unchanged app versions; version tool content independently of upstream's manifests."""
     catalog = read_json(out / 'catalog.json')
     old = {c['id']: c for c in previous['components']}
     for i, c in enumerate(catalog['components']):
         before = old.get(c['id'])
+        if c['kind'] == 'tool' and before:
+            catalog['components'][i] = reconcile_tool(out, c, before)
+            continue
         if c['kind'] != 'app' or not before or c['version'] != before['version']:
             continue
         a = before['artifact']

@@ -26,10 +26,17 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 - 应用版本没变时，保留此前发布的包、图标和元数据，并将它们复制到本次 Release。
   即使共享 runtime、汉化或构建工具变化导致重建内容不同，也不会替换同版本的包。
   要发布这些变化，需提高受影响应用的 `app.json` 版本；版本提高后才发布它的新包。
-- renderer、inputgate 保留各自 `component.json` 的版本及安装钩子。应用的 `requires`
+- renderer、inputgate 的初始版本来自各自 `component.json`，保留安装钩子。应用的 `requires`
   保留，catalog 同时列出两个工具；renderer 也声明 `renderer` 能力。
-- 工具代码或预编译文件发生变化时，仍需提高对应工具版本。发布前检查 renderer 的源码
-  指纹与已提交二进制匹配；不匹配时停止发布，需按上游 renderer 流程重新构建并提交。
+- 发布前检查 renderer 的源码指纹与预编译二进制是否匹配。不匹配或缺少二进制时，
+  Actions 使用上游 Ubuntu 18.04 Docker 环境编译 x86-64 renderer、inputgate，执行
+  `check-target` 和 renderer 测试后更新本次打包文件；失败时停止发布。产物不提交回 Git。
+  renderer 的配套脚本也从当前源码刷新；指纹检查继续保留。
+- 工具版本先采用上游 `component.json`。与上次 Release 比较时，若上游版本未超过
+  已发布版本，则比较包内文件、权限和安装钩子（仅忽略 manifest 的版本字段）：内容相同
+  复用已发布包；内容变化则将已发布版本的补丁号加一，并同步更新包内 manifest、文件名
+  和 catalog。catalog 的工具条目用 `sourceVersion` 记录上游版本，继续拒绝上游版本倒退。
+  上游版本超过已发布版本时直接采用上游版本。此策略仅适用于工具，不改应用版本。
 - 应用 ID 与上游相同。本源不是已安装的上游源的自动替代品；切换来源前需在 Store
   中移除旧来源的同 ID 应用，再从本源安装。移除 source 本身不会卸载应用。需要两份
   应用并存时，应另行分配独立 ID。
@@ -48,19 +55,23 @@ GitHub Release 附件。工作流使用仓库自带的 `GITHUB_TOKEN`，发布 j
 需要 token 的 Release asset API 地址。
 
 上传前先复用版本未变的应用包，更新 catalog 前再次比较已发布版本：除上述一次性迁移外，
-拒绝回退版本，也拒绝同版本但内容不同的包。原生工具不参与应用包复用，内容变化必须提高
-工具版本。本次 catalog 的所有资源都在本次 Release；清理旧 Release 前仍应检查当前
+拒绝回退版本，也拒绝同版本但内容不同的包。工具内容变化由上述版本协调步骤处理。
+发布前及切换固定 catalog 前检查源码提交仍是 main 最新提交，防止旧任务覆盖新源码的发布。
+本次 catalog 的所有资源都在本次 Release；清理旧 Release 前仍应检查当前
 `catalog` 的资源 URL，保留它引用的 Release 以及固定入口 `catalog`。
 
 ## 本地验证
 
-需要 Python 3 和 Node.js，不需要提取 SDK。以下操作只在开发电脑上运行：
+需要 Python 3 和 Node.js，不需要提取 SDK；renderer 与源码不匹配时还需要运行中的 Docker。
+以下操作只在开发电脑上运行：
 
 ```sh
 python kit/tools/test_publish_store.py
+python kit/tools/test_prepare_store_renderer.py
 python kit/tools/test_fit_to_unit.py
 python kit/tools/test_id8_ui.py
 python kit/tools/test_zh.py
+python kit/tools/prepare_store_renderer.py
 python kit/tools/publish_store.py --release-tag cn-build-local-1 --repository yongqi3566/idrive7-apps-cn
 ```
 
